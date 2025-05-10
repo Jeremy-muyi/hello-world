@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from PIL import Image
 import fitz  # PyMuPDF
 import comtypes.client
@@ -60,9 +60,9 @@ class InfoDisplayApp:
             self.logger.error(f"初始化背景失败: {str(e)}")
             self._show_error_message("无法加载背景图片")
 
+    # ---------- 初始化相关方法 ----------
     def _init_resources(self):
         """初始化资源（确保最先执行）"""
-        # 初始化基础属性
         self.files = []
         self.index = 0
         self.current_pdf = None
@@ -70,20 +70,14 @@ class InfoDisplayApp:
         self.is_running = False
         self.error_files = set()
         self.recent_failed = {}
-        
-        # 强制初始化图片属性
-        self.default_image = None
-        self._load_background()
+        self.default_image = self._load_background()
 
     def _init_logging(self):
         """初始化日志系统"""
-        # 确保日志目录存在
         os.makedirs(Config.LOG_FOLDER, exist_ok=True)
-        
         self.logger = logging.getLogger("DisplayApp")
         self.logger.setLevel(logging.INFO)
         
-        # 防止重复添加handler
         if not self.logger.handlers:
             handler = RotatingFileHandler(
                 self._get_log_path(),
@@ -148,27 +142,113 @@ class InfoDisplayApp:
         )
         self.observer.start()
 
+    # ---------- 核心功能方法 ----------
+    def start_display(self):
+        """开始播放"""
+        if not self.is_running:
+            self.is_running = True
+            self.status_label.configure(text="状态：播放中")
+            self.files = self._get_supported_files()
+            self.index = 0
+            self.error_files.clear()
+            self.recent_failed.clear()
+            self.root.after(3000, self._hide_controls)
+            self._show_next()
+
+    def stop_display(self):
+        """停止播放"""
+        self.is_running = False
+        self.status_label.configure(text="状态：已停止")
+        self.show_background()
+
+    def choose_folder(self):
+        """选择新文件夹"""
+        folder = filedialog.askdirectory(initialdir=Config.FOLDER_PATH)
+        if folder:
+            Config.FOLDER_PATH = folder
+            self.stop_display()
+            self.refresh_file_list()
+            self.start_display()
+
+    def quit_program(self):
+        """退出程序"""
+        self.logger.info("用户退出程序")
+        self.observer.stop()
+        self.observer.join()
+        if self.current_pdf:
+            self.current_pdf.close()
+        self.root.destroy()
+
+    # ---------- 文件处理方法 ----------
+    def refresh_file_list(self):
+        """刷新文件列表"""
+        self.files = self._get_supported_files()
+        self.logger.info("文件列表已刷新")
+
+    def _get_supported_files(self):
+        """获取支持的文件列表"""
+        exts = {'.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.ppt', '.pptx'}
+        try:
+            return sorted([
+                os.path.join(Config.FOLDER_PATH, f)
+                for f in os.listdir(Config.FOLDER_PATH)
+                if os.path.splitext(f)[1].lower() in exts
+            ])
+        except Exception as e:
+            self.logger.error(f"读取文件错误: {str(e)}")
+            return []
+
+    # ---------- 显示控制方法 ----------
     def _load_background(self):
-        """安全加载背景图片"""
+        """加载背景图片"""
         try:
             if not os.path.exists(Config.BACKGROUND):
-                raise FileNotFoundError(f"背景图片路径不存在: {Config.BACKGROUND}")
+                raise FileNotFoundError(f"背景路径不存在: {Config.BACKGROUND}")
             
             img = Image.open(Config.BACKGROUND)
-            self.default_image = img.resize(
+            return img.resize(
                 (self.root.winfo_screenwidth(), 
                  self.root.winfo_screenheight()),
                 Image.Resampling.LANCZOS
             )
         except Exception as e:
             self.logger.error(f"背景加载失败: {str(e)}")
-            # 创建纯色备用背景
-            self.default_image = Image.new(
+            return Image.new(
                 'RGB', 
                 (self.root.winfo_screenwidth(), 
                  self.root.winfo_screenheight()),
                 color=(34, 73, 85)  # 深蓝色背景
             )
+
+    def show_background(self):
+        """显示背景图片"""
+        if self.default_image:
+            img = ctk.CTkImage(
+                light_image=self.default_image,
+                size=self.default_image.size
+            )
+            self.label.configure(image=img)
+            self.label.image = img
+
+    # ---------- 其他辅助方法 ----------
+    def _check_mouse_position(self):
+        """检测鼠标位置控制面板显示"""
+        try:
+            y = self.root.winfo_pointery()
+            if y < 50:
+                self._show_controls()
+            self.root.after(500, self._check_mouse_position)
+        except:
+            pass
+
+    def _show_controls(self):
+        """显示控制面板"""
+        self.control_frame.lift()
+        self.root.after(3000, self._hide_controls)
+
+    def _hide_controls(self):
+        """隐藏控制面板"""
+        self.control_frame.lower()
 
     def _get_log_path(self):
         """获取当日日志文件路径"""
@@ -177,20 +257,6 @@ class InfoDisplayApp:
             Config.LOG_FOLDER, 
             f"display_log_{date_str}.txt"
         )
-
-    def show_background(self):
-        """安全显示背景图片"""
-        try:
-            if self.default_image:
-                img = ctk.CTkImage(
-                    light_image=self.default_image,
-                    size=self.default_image.size
-                )
-                self.label.configure(image=img)
-                self.label.image = img
-        except Exception as e:
-            self.logger.error(f"显示背景失败: {str(e)}")
-            self._show_error_message("无法显示背景")
 
     def _show_error_message(self, message):
         """显示错误信息"""
@@ -202,8 +268,6 @@ class InfoDisplayApp:
         )
         error_label.place(relx=0.5, rely=0.5, anchor="center")
 
-    # 其余方法保持不变（start_display, stop_display等）
-
 if __name__ == "__main__":
     try:
         Config.validate_paths()
@@ -213,7 +277,6 @@ if __name__ == "__main__":
     except Exception as e:
         error_msg = f"程序启动失败: {str(e)}"
         print(error_msg)
-        # 显示GUI错误提示
         root = tk.Tk()
         root.withdraw()
-        tk.messagebox.showerror("启动错误", error_msg)
+        messagebox.showerror("启动错误", error_msg)
