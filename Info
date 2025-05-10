@@ -1,0 +1,280 @@
+import os
+import time
+import logging
+import tkinter as tk
+from tkinter import filedialog
+from PIL import Image, ImageTk
+import fitz  # PyMuPDF
+import comtypes.client
+import pythoncom
+import customtkinter as ctk
+import gc
+from datetime import datetime
+
+DISPLAY_SECONDS = 10
+FOLDER_PATH = r"\\aq3nas01.ap.lilly.com\aq3nas_mfg.grp\ELM_Workspaces\AutoDisplay"
+LOG_FOLDER_PATH = r"\\aq3nas01.ap.lilly.com\aq3nas_mfg.grp\ELM_Workspaces\AutoDisplay\Log"
+BACKGROUND_PATH = r"\\aq3nas01.ap.lilly.com\aq3nas_mfg.grp\ELM_Workspaces\AutoDisplay\background.png"
+
+class InfoDisplayApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.attributes('-fullscreen', True)
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        self.folder_path = FOLDER_PATH
+        self.files = []
+        self.index = 0
+        self.current_pdf = None
+        self.pdf_page_index = 0
+        self.is_running = False
+        self.hide_controls_after_id = None
+        self.control_frame_visible = True
+        self.error_files = set()
+        self.recent_failed = {}  # 文件错误记录，防止重复尝试
+
+        self.cleanup_old_logs()
+        self.log_file = self.get_daily_log_file()
+
+        self.default_image = self.load_background_image(BACKGROUND_PATH)
+
+        self.control_frame = ctk.CTkFrame(self.root, fg_color="#344955", height=40)
+        self.control_frame.place(relx=0.5, y=0, anchor="n")
+        self.control_frame.lift()
+
+        ctk.CTkButton(self.control_frame, text="开始投屏", command=self.start_display, height=32, corner_radius=20).pack(side="left", padx=10, pady=5)
+        ctk.CTkButton(self.control_frame, text="结束投屏", command=self.stop_display, height=32, fg_color="red", corner_radius=20).pack(side="left", padx=10, pady=5)
+        ctk.CTkButton(self.control_frame, text="选择文件夹", command=self.choose_folder, height=32, corner_radius=20).pack(side="left", padx=10, pady=5)
+        ctk.CTkButton(self.control_frame, text="退出程序", command=self.quit_program, height=32, fg_color="#a83232", corner_radius=20).pack(side="left", padx=10, pady=5)
+
+        self.status_label = ctk.CTkLabel(self.control_frame, text="状态：未开始", text_color="white")
+        self.status_label.pack(side="right", padx=10)
+
+        self.path_label = ctk.CTkLabel(self.control_frame, text=f"当前路径：{self.folder_path}", text_color="white", anchor="w")
+        self.path_label.pack(fill="x", side="bottom")
+
+        self.label = ctk.CTkLabel(self.root, text="")
+        self.label.pack(expand=True, fill="both")
+
+        self.show_image(self.default_image)
+        self.root.after(1000, self.check_mouse_position)
+
+    def cleanup_old_logs(self, days=30):
+        try:
+            if not os.path.exists(LOG_FOLDER_PATH):
+                os.makedirs(LOG_FOLDER_PATH)
+            for fname in os.listdir(LOG_FOLDER_PATH):
+                if fname.startswith("display_log_") and fname.endswith(".txt"):
+                    fpath = os.path.join(LOG_FOLDER_PATH, fname)
+                    if os.path.isfile(fpath):
+                        mtime = os.path.getmtime(fpath)
+                        if time.time() - mtime > days * 86400:
+                            os.remove(fpath)
+        except Exception as e:
+            print(f"日志清理失败：{e}")
+
+    def get_daily_log_file(self):
+        date_str = datetime.now().strftime("%Y%m%d")
+        return os.path.join(LOG_FOLDER_PATH, f"display_log_{date_str}.txt")
+
+    def log(self, message):
+        timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
+        with open(self.log_file, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} {message}\n")
+        print(f"{timestamp} {message}")
+
+    def choose_folder(self):
+        folder = filedialog.askdirectory(initialdir=self.folder_path)
+        if folder:
+            self.folder_path = folder
+            self.path_label.configure(text=f"当前路径：{self.folder_path}")
+            self.stop_display()
+            self.files = self.get_supported_files()
+            self.index = 0
+            self.log(f"用户选择新播放路径：{self.folder_path}")
+            self.log_file = self.get_daily_log_file()
+            self.start_display()
+
+    def start_display(self):
+        if not self.is_running:
+            self.is_running = True
+            self.status_label.configure(text="状态：播放中")
+            self.files = self.get_supported_files()
+            self.index = 0
+            self.error_files.clear()
+            self.recent_failed.clear()
+            self.root.update()
+            self.root.after(3000, self.hide_controls)
+            self.show_next()
+
+    def stop_display(self):
+        self.is_running = False
+        self.status_label.configure(text="状态：已停止")
+        if self.default_image:
+            self.show_image(self.default_image)
+
+    def quit_program(self):
+        self.log("用户点击退出程序。")
+        self.root.destroy()
+
+    def hide_controls(self):
+        if self.control_frame_visible:
+            self.control_frame.place_forget()
+            self.control_frame_visible = False
+
+    def show_controls(self):
+        if not self.control_frame_visible:
+            self.control_frame.place(relx=0.5, y=0, anchor="n")
+            self.control_frame.lift()
+            self.control_frame_visible = True
+
+        if self.hide_controls_after_id:
+            self.root.after_cancel(self.hide_controls_after_id)
+
+        self.hide_controls_after_id = self.root.after(3000, self.hide_controls)
+
+    def check_mouse_position(self):
+        try:
+            x, y = self.root.winfo_pointerx(), self.root.winfo_pointery()
+            if y < 50:
+                self.show_controls()
+        except:
+            pass
+        self.root.after(500, self.check_mouse_position)
+
+    def get_supported_files(self):
+        supported_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.pdf', '.ppt', '.pptx'}
+        supported = []
+        try:
+            if not os.path.exists(self.folder_path):
+                self.log(f"播放目录不可用：{self.folder_path}")
+                return []
+            for filename in os.listdir(self.folder_path):
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in supported_exts:
+                    supported.append(os.path.join(self.folder_path, filename))
+            return sorted(supported)
+        except Exception as e:
+            self.log(f"读取文件夹出错：{e}")
+            return []
+
+    def load_background_image(self, path):
+        try:
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"找不到背景图路径: {path}")
+            img = Image.open(path)
+            return img.resize((self.root.winfo_screenwidth(), self.root.winfo_screenheight()), Image.Resampling.LANCZOS)
+        except Exception as e:
+            self.log(f"加载背景图失败：{e}")
+            return None
+
+    def show_image(self, pil_image):
+        if pil_image:
+            img = ctk.CTkImage(light_image=pil_image, size=pil_image.size)
+            self.label.configure(image=img)
+            self.label.image = img
+
+    def prepare_next(self):
+        if self.is_running:
+            self.index = (self.index + 1) % len(self.files)
+            self.pdf_page_index = 0
+            gc.collect()
+            self.root.after(DISPLAY_SECONDS * 1000, self.show_next)
+
+    def show_next(self):
+        if not self.is_running or not self.files:
+            return
+
+        filepath = self.files[self.index]
+        if filepath in self.error_files or self.recent_failed.get(filepath, 0) >= 3:
+            self.prepare_next()
+            return
+
+        ext = os.path.splitext(filepath)[1].lower()
+
+        try:
+            if not os.path.exists(filepath):
+                raise FileNotFoundError("文件不存在")
+
+            self.log(f"开始播放：{filepath}")
+
+            if ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+                img = Image.open(filepath).resize(
+                    (self.root.winfo_screenwidth(), self.root.winfo_screenheight()),
+                    Image.Resampling.LANCZOS
+                )
+                self.show_image(img)
+                self.prepare_next()
+
+            elif ext == '.pdf':
+                if self.current_pdf is None or self.current_pdf.name != filepath:
+                    if self.current_pdf:
+                        self.current_pdf.close()
+                    self.current_pdf = fitz.open(filepath)
+                    self.pdf_page_index = 0
+
+                if self.pdf_page_index < len(self.current_pdf):
+                    page = self.current_pdf.load_page(self.pdf_page_index)
+                    pix = page.get_pixmap()
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    img = img.resize(
+                        (self.root.winfo_screenwidth(), self.root.winfo_screenheight()),
+                        Image.Resampling.LANCZOS
+                    )
+                    self.show_image(img)
+                    self.pdf_page_index += 1
+                    self.root.after(DISPLAY_SECONDS * 1000, self.show_next)
+                else:
+                    self.current_pdf.close()
+                    self.current_pdf = None
+                    self.prepare_next()
+
+            elif ext in ['.ppt', '.pptx']:
+                self.play_ppt_slideshow(filepath)
+
+        except Exception as e:
+            self.log(f"播放失败：{filepath} 错误：{e}")
+            self.error_files.add(filepath)
+            self.recent_failed[filepath] = self.recent_failed.get(filepath, 0) + 1
+            self.show_image(self.default_image)
+            self.prepare_next()
+
+    def play_ppt_slideshow(self, ppt_path):
+        pythoncom.CoInitialize()
+        try:
+            powerpoint = comtypes.client.CreateObject("Powerpoint.Application")
+            powerpoint.Visible = 1
+            presentation = powerpoint.Presentations.Open(ppt_path, WithWindow=True)
+
+            for slide in presentation.Slides:
+                slide.SlideShowTransition.AdvanceOnTime = True
+                slide.SlideShowTransition.AdvanceTime = DISPLAY_SECONDS
+
+            presentation.SlideShowSettings.AdvanceMode = 2
+            presentation.SlideShowSettings.Run()
+
+            start_time = time.time()
+            timeout = 300
+            while time.time() - start_time < timeout:
+                try:
+                    if presentation.SlideShowWindow.View.State != 1:
+                        break
+                except Exception:
+                    break
+                time.sleep(1)
+
+            presentation.Close()
+            powerpoint.Quit()
+        except Exception as e:
+            self.log(f"PPT 播放出错：{e}")
+            self.error_files.add(ppt_path)
+            self.recent_failed[ppt_path] = self.recent_failed.get(ppt_path, 0) + 1
+        finally:
+            pythoncom.CoUninitialize()
+            self.prepare_next()
+
+if __name__ == "__main__":
+    root = ctk.CTk()
+    app = InfoDisplayApp(root)
+    root.mainloop()
