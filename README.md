@@ -1,3 +1,17 @@
+C:\Users\yang_jing2@lilly.com\AppData\Local\Programs\Python\Python312\python.exe "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py" 
+Traceback (most recent call last):
+  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 366, in <module>
+    app = InfoDisplayApp(root)
+          ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 44, in __init__
+    self._init_ui()
+  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 91, in _init_ui
+    self.show_background()
+  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 176, in show_background
+    if self.default_image:
+       ^^^^^^^^^^^^^^^^^^
+AttributeError: 'InfoDisplayApp' object has no attribute 'default_image'
+
 # Welcome to GitHub
 
 Welcome to GitHub—where millions of developers work together on software. Ready to get started? Let’s learn how this all works by building and publishing your first GitHub Pages website!
