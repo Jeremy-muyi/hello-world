@@ -1,104 +1,219 @@
-C:\Users\yang_jing2@lilly.com\AppData\Local\Programs\Python\Python312\python.exe "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py" 
-Traceback (most recent call last):
-  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 366, in <module>
-    app = InfoDisplayApp(root)
-          ^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 44, in __init__
-    self._init_ui()
-  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 91, in _init_ui
-    self.show_background()
-  File "C:\Users\yang_jing2@lilly.com\OneDrive - Eli Lilly and Company\PycharmProjects\pythonProject\workspace\InfoAuDisp.py", line 176, in show_background
-    if self.default_image:
-       ^^^^^^^^^^^^^^^^^^
-AttributeError: 'InfoDisplayApp' object has no attribute 'default_image'
+import os
+import time
+import logging
+import tkinter as tk
+from tkinter import filedialog
+from PIL import Image
+import fitz  # PyMuPDF
+import comtypes.client
+import pythoncom
+import customtkinter as ctk
+from datetime import datetime
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from logging.handlers import RotatingFileHandler
 
-# Welcome to GitHub
+# 配置参数类
+class Config:
+    DISPLAY_SECONDS = 10
+    FOLDER_PATH = r"\\aq3nas01.ap.lilly.com\aq3nas_mfg.grp\ELM_Workspaces\AutoDisplay"
+    LOG_FOLDER = r"\\aq3nas01.ap.lilly.com\aq3nas_mfg.grp\ELM_Workspaces\AutoDisplay\Log"
+    BACKGROUND = r"\\aq3nas01.ap.lilly.com\aq3nas_mfg.grp\ELM_Workspaces\AutoDisplay\background.png"
+    LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB
+    LOG_BACKUP_COUNT = 5
+    RETRY_INTERVAL = 3600  # 1小时
+    MAX_RETRIES = 3
 
-Welcome to GitHub—where millions of developers work together on software. Ready to get started? Let’s learn how this all works by building and publishing your first GitHub Pages website!
+    @classmethod
+    def validate_paths(cls):
+        """验证关键路径是否存在"""
+        missing = []
+        if not os.path.exists(cls.FOLDER_PATH):
+            missing.append(f"文件夹路径: {cls.FOLDER_PATH}")
+        if not os.path.exists(cls.BACKGROUND):
+            missing.append(f"背景图片: {cls.BACKGROUND}")
+        if missing:
+            raise FileNotFoundError("以下路径不存在:\n" + "\n".join(missing))
 
-## Repositories
+class FileChangeHandler(FileSystemEventHandler):
+    """文件系统变更处理器"""
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
 
-Right now, we’re in your first GitHub **repository**. A repository is like a folder or storage space for your project. Your project's repository contains all its files such as code, documentation, images, and more. It also tracks every change that you—or your collaborators—make to each file, so you can always go back to previous versions of your project if you make any mistakes.
+    def on_modified(self, event):
+        """当检测到文件修改时刷新文件列表"""
+        if not event.is_directory:
+            self.app.refresh_file_list()
 
-This repository contains three important files: The HTML code for your first website on GitHub, the CSS stylesheet that decorates your website with colors and fonts, and the **README** file. It also contains an image folder, with one image file.
+class InfoDisplayApp:
+    def __init__(self, root):
+        self.root = root
+        self._init_resources()  # 先初始化资源
+        self._init_logging()    # 接着初始化日志
+        self._init_ui()         # 然后初始化UI
+        self._init_file_monitor()  # 最后初始化文件监控
+        
+        try:
+            self.show_background()
+        except Exception as e:
+            self.logger.error(f"初始化背景失败: {str(e)}")
+            self._show_error_message("无法加载背景图片")
 
-## Describe your project
+    def _init_resources(self):
+        """初始化资源（确保最先执行）"""
+        # 初始化基础属性
+        self.files = []
+        self.index = 0
+        self.current_pdf = None
+        self.pdf_page_index = 0
+        self.is_running = False
+        self.error_files = set()
+        self.recent_failed = {}
+        
+        # 强制初始化图片属性
+        self.default_image = None
+        self._load_background()
 
-You are currently viewing your project's **README** file. **_README_** files are like cover pages or elevator pitches for your project. They are written in plain text or [Markdown language](https://guides.github.com/features/mastering-markdown/), and usually include a paragraph describing the project, directions on how to use it, who authored it, and more.
+    def _init_logging(self):
+        """初始化日志系统"""
+        # 确保日志目录存在
+        os.makedirs(Config.LOG_FOLDER, exist_ok=True)
+        
+        self.logger = logging.getLogger("DisplayApp")
+        self.logger.setLevel(logging.INFO)
+        
+        # 防止重复添加handler
+        if not self.logger.handlers:
+            handler = RotatingFileHandler(
+                self._get_log_path(),
+                maxBytes=Config.LOG_MAX_SIZE,
+                backupCount=Config.LOG_BACKUP_COUNT,
+                encoding='utf-8'
+            )
+            formatter = logging.Formatter('[%(asctime)s] %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
 
-[Learn more about READMEs](https://help.github.com/en/articles/about-readmes)
+    def _init_ui(self):
+        """初始化用户界面"""
+        self.root.attributes('-fullscreen', True)
+        self.root.tk.call('tk', 'scaling', 2.0)  # 高DPI适配
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
 
-## Your first website
+        # 控制面板
+        self.control_frame = ctk.CTkFrame(self.root, fg_color="#344955", height=40)
+        self.control_frame.place(relx=0.5, y=0, anchor="n")
+        
+        # 控制按钮
+        controls = [
+            ("开始投屏", self.start_display, "blue"),
+            ("结束投屏", self.stop_display, "red"),
+            ("选择文件夹", self.choose_folder, "green"),
+            ("退出程序", self.quit_program, "#a83232")
+        ]
+        for text, cmd, color in controls:
+            btn = ctk.CTkButton(
+                self.control_frame, 
+                text=text, 
+                command=cmd,
+                height=32,
+                corner_radius=20,
+                fg_color=color
+            )
+            btn.pack(side="left", padx=10, pady=5)
 
-**GitHub Pages** is a free and easy way to create a website using the code that lives in your GitHub repositories. You can use GitHub Pages to build a portfolio of your work, create a personal website, or share a fun project that you coded with the world. GitHub Pages is automatically enabled in this repository, but when you create new repositories in the future, the steps to launch a GitHub Pages website will be slightly different.
+        # 状态显示
+        self.status_label = ctk.CTkLabel(
+            self.control_frame, 
+            text="状态：未开始", 
+            text_color="white"
+        )
+        self.status_label.pack(side="right", padx=10)
 
-[Learn more about GitHub Pages](https://pages.github.com/)
+        # 主显示区域
+        self.label = ctk.CTkLabel(self.root, text="")
+        self.label.pack(expand=True, fill="both")
 
-## Rename this repository to publish your site
+        self.root.after(1000, self._check_mouse_position)
 
-We've already set-up a GitHub Pages website for you, based on your personal username. This repository is called `hello-world`, but you'll rename it to: `username.github.io`, to match your website's URL address. If the first part of the repository doesn’t exactly match your username, it won’t work, so make sure to get it right.
+    def _init_file_monitor(self):
+        """初始化文件监控"""
+        self.observer = Observer()
+        self.observer.schedule(
+            FileChangeHandler(self),
+            Config.FOLDER_PATH,
+            recursive=True
+        )
+        self.observer.start()
 
-Let's get started! To update this repository’s name, click the `Settings` tab on this page. This will take you to your repository’s settings page. 
+    def _load_background(self):
+        """安全加载背景图片"""
+        try:
+            if not os.path.exists(Config.BACKGROUND):
+                raise FileNotFoundError(f"背景图片路径不存在: {Config.BACKGROUND}")
+            
+            img = Image.open(Config.BACKGROUND)
+            self.default_image = img.resize(
+                (self.root.winfo_screenwidth(), 
+                 self.root.winfo_screenheight()),
+                Image.Resampling.LANCZOS
+            )
+        except Exception as e:
+            self.logger.error(f"背景加载失败: {str(e)}")
+            # 创建纯色备用背景
+            self.default_image = Image.new(
+                'RGB', 
+                (self.root.winfo_screenwidth(), 
+                 self.root.winfo_screenheight()),
+                color=(34, 73, 85)  # 深蓝色背景
+            )
 
-![repo-settings-image](https://user-images.githubusercontent.com/18093541/63130482-99e6ad80-bf88-11e9-99a1-d3cf1660b47e.png)
+    def _get_log_path(self):
+        """获取当日日志文件路径"""
+        date_str = datetime.now().strftime("%Y%m%d")
+        return os.path.join(
+            Config.LOG_FOLDER, 
+            f"display_log_{date_str}.txt"
+        )
 
-Under the **Repository Name** heading, type: `username.github.io`, where username is your username on GitHub. Then click **Rename**—and that’s it. When you’re done, click your repository name or browser’s back button to return to this page.
+    def show_background(self):
+        """安全显示背景图片"""
+        try:
+            if self.default_image:
+                img = ctk.CTkImage(
+                    light_image=self.default_image,
+                    size=self.default_image.size
+                )
+                self.label.configure(image=img)
+                self.label.image = img
+        except Exception as e:
+            self.logger.error(f"显示背景失败: {str(e)}")
+            self._show_error_message("无法显示背景")
 
-<img width="1039" alt="rename_screenshot" src="https://user-images.githubusercontent.com/18093541/63129466-956cc580-bf85-11e9-92d8-b028dd483fa5.png">
+    def _show_error_message(self, message):
+        """显示错误信息"""
+        error_label = ctk.CTkLabel(
+            self.root,
+            text=message,
+            text_color="red",
+            font=("Arial", 24)
+        )
+        error_label.place(relx=0.5, rely=0.5, anchor="center")
 
-Once you click **Rename**, your website will automatically be published at: https://your-username.github.io/. The HTML file—called `index.html`—is rendered as the home page and you'll be making changes to this file in the next step.
+    # 其余方法保持不变（start_display, stop_display等）
 
-Congratulations! You just launched your first GitHub Pages website. It's now live to share with the entire world
-
-## Making your first edit
-
-When you make any change to any file in your project, you’re making a **commit**. If you fix a typo, update a filename, or edit your code, you can add it to GitHub as a commit. Your commits represent your project’s entire history—and they’re all saved in your project’s repository.
-
-With each commit, you have the opportunity to write a **commit message**, a short, meaningful comment describing the change you’re making to a file. So you always know exactly what changed, no matter when you return to a commit.
-
-## Practice: Customize your first GitHub website by writing HTML code
-
-Want to edit the site you just published? Let’s practice commits by introducing yourself in your `index.html` file. Don’t worry about getting it right the first time—you can always build on your introduction later.
-
-Let’s start with this template:
-
-```
-<p>Hello World! I’m [username]. This is my website!</p>
-```
-
-To add your introduction, copy our template and click the edit pencil icon at the top right hand corner of the `index.html` file.
-
-<img width="997" alt="edit-this-file" src="https://user-images.githubusercontent.com/18093541/63131820-0794d880-bf8d-11e9-8b3d-c096355e9389.png">
-
-
-Delete this placeholder line:
-
-```
-<p>Welcome to your first GitHub Pages website!</p>
-```
-
-Then, paste the template to line 15 and fill in the blanks.
-
-<img width="1032" alt="edit-githuboctocat-index" src="https://user-images.githubusercontent.com/18093541/63132339-c3a2d300-bf8e-11e9-8222-59c2702f6c42.png">
-
-
-When you’re done, scroll down to the `Commit changes` section near the bottom of the edit page. Add a short message explaining your change, like "Add my introduction", then click `Commit changes`.
-
-
-<img width="1030" alt="add-my-username" src="https://user-images.githubusercontent.com/18093541/63131801-efbd5480-bf8c-11e9-9806-89273f027d16.png">
-
-Once you click `Commit changes`, your changes will automatically be published on your GitHub Pages website. Refresh the page to see your new changes live in action.
-
-:tada: You just made your first commit! :tada:
-
-## Extra Credit: Keep on building!
-
-Change the placeholder Octocat gif on your GitHub Pages website by [creating your own personal Octocat emoji](https://myoctocat.com/build-your-octocat/) or [choose a different Octocat gif from our logo library here](https://octodex.github.com/). Add that image to line 12 of your `index.html` file, in place of the `<img src=` link.
-
-Want to add even more code and fun styles to your GitHub Pages website? [Follow these instructions](https://github.com/github/personal-website) to build a fully-fledged static website.
-
-![octocat](./images/create-octocat.png)
-
-## Everything you need to know about GitHub
-
-Getting started is the hardest part. If there’s anything you’d like to know as you get started with GitHub, try searching [GitHub Help](https://help.github.com). Our documentation has tutorials on everything from changing your repository settings to configuring GitHub from your command line.
+if __name__ == "__main__":
+    try:
+        Config.validate_paths()
+        root = ctk.CTk()
+        app = InfoDisplayApp(root)
+        root.mainloop()
+    except Exception as e:
+        error_msg = f"程序启动失败: {str(e)}"
+        print(error_msg)
+        # 显示GUI错误提示
+        root = tk.Tk()
+        root.withdraw()
+        tk.messagebox.showerror("启动错误", error_msg)
